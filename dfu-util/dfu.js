@@ -198,50 +198,17 @@ var dfu = {};
     };
 
     dfu.Device.prototype.readInterfaceNames = async function() {
-        const DT_INTERFACE = 4;
-
         let configs = {};
-        let allStringIndices = new Set();
-        for (let configIndex=0; configIndex < this.device_.configurations.length; configIndex++) {
-            const rawConfig = await this.readConfigurationDescriptor(configIndex);
-            let configDesc = dfu.parseConfigurationDescriptor(rawConfig);
-            let configValue = configDesc.bConfigurationValue;
+        for (let config of this.device_.configurations) {
+            let configValue = config.configurationValue;
             configs[configValue] = {};
-
-            // Retrieve string indices for interface names
-            for (let desc of configDesc.descriptors) {
-                if (desc.bDescriptorType == DT_INTERFACE) {
-                    if (!(desc.bInterfaceNumber in configs[configValue])) {
-                        configs[configValue][desc.bInterfaceNumber] = {};
-                    }
-                    configs[configValue][desc.bInterfaceNumber][desc.bAlternateSetting] = desc.iInterface;
-                    if (desc.iInterface > 0) {
-                        allStringIndices.add(desc.iInterface);
-                    }
+            for (let intf of config.interfaces) {
+                configs[configValue][intf.interfaceNumber] = {};
+                for (let alt of intf.alternates) {
+                    configs[configValue][intf.interfaceNumber][alt.alternateSetting] = alt.interfaceName;
                 }
             }
         }
-
-        let strings = {};
-        // Retrieve interface name strings
-        for (let index of allStringIndices) {
-            try {
-                strings[index] = await this.readStringDescriptor(index, 0x0409);
-            } catch (error) {
-                console.log(error);
-                strings[index] = null;
-            }
-        }
-
-        for (let configValue in configs) {
-            for (let intfNumber in configs[configValue]) {
-                for (let alt in configs[configValue][intfNumber]) {
-                    const iIndex = configs[configValue][intfNumber][alt];
-                    configs[configValue][intfNumber][alt] = strings[iIndex];
-                }
-            }
-        }
-
         return configs;
     };
 
@@ -350,42 +317,122 @@ var dfu = {};
         return descriptors;
     };
 
-    dfu.Device.prototype.readConfigurationDescriptor = function(index) {
+    dfu.Device.prototype.readConfigurationDescriptor = async function(index) {
         const GET_DESCRIPTOR = 0x06;
-        const DT_CONFIGURATION = 0x02;
-        const wValue = ((DT_CONFIGURATION << 8) | index);
+        const DT_DFU_FUNCTIONAL = 0x21;
+        const wValue = (DT_DFU_FUNCTIONAL << 8);
 
-        return this.device_.controlTransferIn({
-            "requestType": "standard",
-            "recipient": "device",
-            "request": GET_DESCRIPTOR,
-            "value": wValue,
-            "index": 0
-        }, 4).then(
-            result => {
-                if (result.status == "ok") {
-                    // Read out length of the configuration descriptor
-                    let wLength = result.data.getUint16(2, true);
-                    return this.device_.controlTransferIn({
-                        "requestType": "standard",
-                        "recipient": "device",
-                        "request": GET_DESCRIPTOR,
-                        "value": wValue,
-                        "index": 0
-                    }, wLength);
-                } else {
-                    return Promise.reject(result.status);
+        let config = this.device_.configurations[index];
+        if (!config) {
+            throw new RangeError(`Configuration index ${index} out of range`);
+        }
+
+        let chunks = [];
+
+        // Configuration Descriptor (9 bytes)
+        let configBuf = new ArrayBuffer(9);
+        let configView = new DataView(configBuf);
+        configView.setUint8(0, 9); // bLength
+        configView.setUint8(1, 2); // bDescriptorType (DT_CONFIGURATION)
+        configView.setUint16(2, 0, true); // wTotalLength (placeholder)
+        configView.setUint8(4, config.interfaces.length); // bNumInterfaces
+        configView.setUint8(5, config.configurationValue); // bConfigurationValue
+        configView.setUint8(6, 0); // iConfiguration (placeholder)
+        configView.setUint8(7, 0x80); // bmAttributes (placeholder)
+        configView.setUint8(8, 50); // bMaxPower (placeholder)
+        chunks.push(new Uint8Array(configBuf));
+
+        for (let intf of config.interfaces) {
+            for (let alt of intf.alternates) {
+                // Interface Descriptor (9 bytes)
+                let intfBuf = new ArrayBuffer(9);
+                let intfView = new DataView(intfBuf);
+                intfView.setUint8(0, 9); // bLength
+                intfView.setUint8(1, 4); // bDescriptorType (DT_INTERFACE)
+                intfView.setUint8(2, intf.interfaceNumber); // bInterfaceNumber
+                intfView.setUint8(3, alt.alternateSetting); // bAlternateSetting
+                intfView.setUint8(4, alt.endpoints.length); // bNumEndpoints
+                intfView.setUint8(5, alt.interfaceClass); // bInterfaceClass
+                intfView.setUint8(6, alt.interfaceSubclass); // bInterfaceSubClass
+                intfView.setUint8(7, alt.interfaceProtocol); // bInterfaceProtocol
+                intfView.setUint8(8, 0); // iInterface (placeholder)
+                chunks.push(new Uint8Array(intfBuf));
+
+                for (let endpoint of alt.endpoints) {
+                    // Endpoint Descriptor (7 bytes)
+                    let epBuf = new ArrayBuffer(7);
+                    let epView = new DataView(epBuf);
+                    epView.setUint8(0, 7); // bLength
+                    epView.setUint8(1, 5); // bDescriptorType (DT_ENDPOINT)
+                    
+                    let epAddr = endpoint.endpointNumber;
+                    if (endpoint.direction === "in") {
+                        epAddr |= 0x80;
+                    }
+                    epView.setUint8(2, epAddr); // bEndpointAddress
+
+                    let epAttr = 0;
+                    if (endpoint.type === "isochronous") {
+                        epAttr = 1;
+                    } else if (endpoint.type === "bulk") {
+                        epAttr = 2;
+                    } else if (endpoint.type === "interrupt") {
+                        epAttr = 3;
+                    }
+                    epView.setUint8(3, epAttr); // bmAttributes
+                    epView.setUint16(4, endpoint.packetSize, true); // wMaxPacketSize
+                    epView.setUint8(6, 0); // bInterval (placeholder)
+                    chunks.push(new Uint8Array(epBuf));
+                }
+
+                // If this is a DFU interface, query the DFU Functional Descriptor directly
+                if (alt.interfaceClass === 0xFE && alt.interfaceSubclass === 0x01) {
+                    let dfuDescriptorAppended = false;
+                    try {
+                        let result = await this.device_.controlTransferIn({
+                            "requestType": "standard",
+                            "recipient": "interface",
+                            "request": GET_DESCRIPTOR,
+                            "value": wValue,
+                            "index": intf.interfaceNumber
+                        }, 9);
+                        if (result.status === "ok") {
+                            chunks.push(new Uint8Array(result.data.buffer, result.data.byteOffset, result.data.byteLength));
+                            dfuDescriptorAppended = true;
+                        }
+                    } catch (error) {
+                        console.warn("Failed to read DFU functional descriptor directly:", error);
+                    }
+
+                    if (!dfuDescriptorAppended) {
+                        // Fallback: Append a default DfuSe DFU functional descriptor
+                        let dfuFuncDesc = new Uint8Array([
+                            9,      // bLength
+                            0x21,   // bDescriptorType (DT_DFU_FUNCTIONAL)
+                            0x0B,   // bmAttributes
+                            0xE8, 0x03, // wDetachTimeOut (1000 ms)
+                            0x00, 0x08, // wTransferSize (2048 bytes)
+                            0x1A, 0x01  // bcdDFUVersion (0x011a)
+                        ]);
+                        chunks.push(dfuFuncDesc);
+                    }
                 }
             }
-        ).then(
-            result => {
-                if (result.status == "ok") {
-                    return Promise.resolve(result.data);
-                } else {
-                    return Promise.reject(result.status);
-                }
-            }
-        );
+        }
+
+        let totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+        let finalBuf = new ArrayBuffer(totalLength);
+        let finalView = new Uint8Array(finalBuf);
+        let offset = 0;
+        for (let chunk of chunks) {
+            finalView.set(chunk, offset);
+            offset += chunk.length;
+        }
+
+        let finalDataView = new DataView(finalBuf);
+        finalDataView.setUint16(2, totalLength, true);
+
+        return finalDataView;
     };
 
     dfu.Device.prototype.requestOut = function(bRequest, data, wValue=0) {

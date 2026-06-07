@@ -74,10 +74,7 @@ var device = null;
         if (interfaces.some(intf => (intf.name == null))) {
             // Manually retrieve the interface name string descriptors
             let tempDevice = new dfu.Device(device_, interfaces[0]);
-            await tempDevice.device_.open();
-            await tempDevice.device_.selectConfiguration(1);
             let mapping = await tempDevice.readInterfaceNames();
-            await tempDevice.close();
 
             for (let intf of interfaces) {
                 if (intf.name === null) {
@@ -120,18 +117,22 @@ var device = null;
 
     function getDFUDescriptorProperties(device) {
         // Attempt to read the DFU functional descriptor
-        // TODO: read the selected configuration's descriptor
-        return device.readConfigurationDescriptor(0).then(
+        let configIndex = 0;
+        if (device.settings && device.settings.configuration) {
+            let configValue = device.settings.configuration.configurationValue;
+            let index = device.device_.configurations.findIndex(c => c.configurationValue === configValue);
+            if (index !== -1) {
+                configIndex = index;
+            }
+        }
+        return device.readConfigurationDescriptor(configIndex).then(
             data => {
                 let configDesc = dfu.parseConfigurationDescriptor(data);
                 let funcDesc = null;
-                let configValue = device.settings.configuration.configurationValue;
-                if (configDesc.bConfigurationValue == configValue) {
-                    for (let desc of configDesc.descriptors) {
-                        if (desc.bDescriptorType == 0x21 && desc.hasOwnProperty("bcdDFUVersion")) {
-                            funcDesc = desc;
-                            break;
-                        }
+                for (let desc of configDesc.descriptors) {
+                    if (desc.bDescriptorType == 0x21 && desc.hasOwnProperty("bcdDFUVersion")) {
+                        funcDesc = desc;
+                        break;
                     }
                 }
 
@@ -340,7 +341,7 @@ var device = null;
                     }
                 }
 
-                if (desc.DFUVersion == 0x011a && device.settings.alternate.interfaceProtocol == 0x02) {
+                if (desc.DFUVersion == 0x011a || device.settings.alternate.interfaceProtocol == 0x02) {
                     device = new dfuse.Device(device.device_, device.settings);
                     if (device.memoryInfo) {
                         let totalSize = 0;
@@ -376,6 +377,10 @@ var device = null;
             device.logWarning = logWarning;
             device.logError = logError;
             device.logProgress = logProgress;
+
+            if (device.warning) {
+                device.logWarning(device.warning);
+            }
 
             // Clear logs
             clearLog(uploadLog);

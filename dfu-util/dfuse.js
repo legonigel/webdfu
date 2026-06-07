@@ -13,8 +13,37 @@ var dfuse = {};
         dfu.Device.call(this, device, settings);
         this.memoryInfo = null;
         this.startAddress = NaN;
-        if (settings.name) {
-            this.memoryInfo = dfuse.parseMemoryDescriptor(settings.name);
+        
+        let name = settings.name;
+        if (!name && device.configuration) {
+            let intfNumber = settings["interface"].interfaceNumber;
+            let altSetting = settings.alternate.alternateSetting;
+            let intf = device.configuration.interfaces.find(i => i.interfaceNumber === intfNumber);
+            if (intf) {
+                let alt = intf.alternates.find(a => a.alternateSetting === altSetting);
+                if (alt) {
+                    name = alt.interfaceName;
+                }
+            }
+        }
+
+        if (!name) {
+            // Fallback for STM32 devices if the interface name descriptor is null or missing
+            this.warning = "Device did not provide an interface name descriptor. Falling back to default STM32 memory layout.";
+            name = "@Internal Flash  /0x08000000/128*0002Kg";
+        }
+
+        if (name) {
+            try {
+                this.settings.name = name;
+                this.memoryInfo = dfuse.parseMemoryDescriptor(name);
+            } catch (err) {
+                console.warn(`Failed to parse memory descriptor "${name}":`, err);
+                this.warning = `Failed to parse memory descriptor "${name}". Falling back to default STM32 memory layout.`;
+                name = "@Internal Flash  /0x08000000/128*0002Kg";
+                this.settings.name = name;
+                this.memoryInfo = dfuse.parseMemoryDescriptor(name);
+            }
         }
     }
 
